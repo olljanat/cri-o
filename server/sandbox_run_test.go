@@ -59,6 +59,10 @@ var _ = t.Describe("RunPodSandbox", func() {
 								Ipc: types.NamespaceModeNODE,
 							},
 						},
+						Sysctls: map[string]string{
+							"net.ipv4.ping_group_range":           "0 2147483647",
+							"net.ipv4.ip_unprivileged_port_start": "0",
+						},
 					},
 				}})
 

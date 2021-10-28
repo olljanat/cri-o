@@ -659,7 +659,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	}
 
 	// Add default sysctls given in crio.conf
-	sysctls := s.configureGeneratorForSysctls(ctx, g, hostNetwork, hostIPC, req.Config.Linux.Sysctls)
+	sysctls := s.configureGeneratorForSysctls(ctx, g, hostNetwork, hostIPC, usernsMode, req.Config.Linux.Sysctls)
 
 	// set up namespaces
 	nsCleanupFuncs, err := s.configureGeneratorForSandboxNamespaces(hostNetwork, hostIPC, hostPID, sandboxIDMappings, sysctls, sb, g)
@@ -959,7 +959,15 @@ func setupShm(podSandboxRunDir, mountLabel string, shmSize int64) (shmPath strin
 	return shmPath, nil
 }
 
-func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.Generator, hostNetwork, hostIPC bool, sysctls map[string]string) map[string]string {
+// sysctlExists checks if a sysctl exists; runc will error if we add any that do not actually
+// exist, so do not add the default ones if running on an old kernel.
+func sysctlExists(s string) bool {
+	f := filepath.Join("/proc", "sys", strings.Replace(s, ".", "/", -1))
+	_, err := os.Stat(f)
+	return err == nil
+}
+
+func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.Generator, hostNetwork, hostIPC bool, usernsMode string, sysctls map[string]string) map[string]string {
 	sysctlsToReturn := make(map[string]string)
 	defaultSysctls, err := s.config.RuntimeConfig.Sysctls()
 	if err != nil {
@@ -973,6 +981,24 @@ func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.G
 		}
 		g.AddLinuxSysctl(sysctl.Key(), sysctl.Value())
 		sysctlsToReturn[sysctl.Key()] = sysctl.Value()
+	}
+
+	// Add default sysctls that are generally safe and useful; currently we
+	// grant the capabilities to allow these anyway. You can override if
+	// you want to restore the original behaviour.
+	// We do not set network sysctls if network namespace is host, or if we are
+	// joining an existing namespace, only if we create a new net namespace.
+	if !hostNetwork {
+		// We cannot set up ping socket support in a user namespace
+		if usernsMode == "" && sysctlExists("net.ipv4.ping_group_range") {
+			// allow unprivileged ICMP echo sockets without CAP_NET_RAW
+			sysctlsToReturn["net.ipv4.ping_group_range"] = "0 2147483647"
+		}
+
+		if sysctlExists("net.ipv4.ip_unprivileged_port_start") {
+			// allow opening any port less than 1024 without CAP_NET_BIND_SERVICE
+			sysctlsToReturn["net.ipv4.ip_unprivileged_port_start"] = "0"
+		}
 	}
 
 	// extract linux sysctls from annotations and pass down to oci runtime
